@@ -12,7 +12,7 @@ services:
     volumes:
       - mlflow_data:/mlflow
     networks:
-      - final
+      - final_auto_ml_task
     restart: "no"
     
   mlflow:
@@ -33,7 +33,7 @@ services:
     volumes:
       - mlflow_data:/mlflow
     networks:
-      - final
+      - final_auto_ml_task
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000')"]
       interval: 10s
@@ -61,6 +61,9 @@ services:
       TARGET: "target"
       PSI_THRESHOLD: "0.2"
       DRIFT_STRENGTH: "0.25"
+      AB_REQUEST_LOG: "/ab_logs/requests.csv"
+      AB_EVAL_REPORT: "/opt/airflow/logs/ab_reports/ab_eval_latest.json"
+      DRIFT_REPORT_OUT: "/opt/airflow/logs/drift_reports/drift_latest.csv"
     ports:
       - "8088:8080"
     command: >
@@ -73,13 +76,14 @@ services:
       "
     restart: always
     networks:
-      - final
+      - final_auto_ml_task
     volumes:
       - ../dags:/opt/airflow/dags
       - ../src:/opt/airflow/src
       - airflow_logs:/opt/airflow/logs
       - airflow_db:/opt/airflow
       - mlflow_data:/mlflow
+      - ab_router_logs:/ab_logs
 
   ab_router:
     build:
@@ -98,21 +102,30 @@ services:
       REG_MODEL_NAME: "IrisClassifier"
       AB_SPLIT_B: "0.3"
       REQUEST_LOG: "/usr/src/app/logs/requests.csv"
+      ROUTER_CONFIG: "/usr/src/app/logs/router_config.json"
     ports:
       - "8080:8080"
     networks:
-      - final
+      - final_auto_ml_task
     volumes:
       - ab_router_logs:/usr/src/app/logs
       - mlflow_data:/mlflow
 
 networks:
-  final:
+  final_auto_ml_task:
      driver: bridge
      external: false
 
 volumes:
   mlflow_data:
+    driver: local
+    external: false
   airflow_logs:
+    driver: local
+    external: false
   airflow_db:
+    driver: local
+    external: false
   ab_router_logs:
+    driver: local
+    external: false
