@@ -1,0 +1,118 @@
+services:
+  mlflow_init:
+    image: alpine:3.19
+    user: "0:0"
+    command: >
+      sh -c "
+        set -e;
+        echo '[mlflow_init] fixing permissions (wide-open 777)';
+        mkdir -p /mlflow/artifacts;
+        chmod -R 777 /mlflow
+      "
+    volumes:
+      - mlflow_data:/mlflow
+    networks:
+      - final
+    restart: "no"
+    
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.3
+    depends_on:
+      mlflow_init:
+        condition: service_completed_successfully
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root file:/mlflow/artifacts
+      --serve-artifacts
+      --artifacts-destination /mlflow/artifacts
+    ports:
+      - "4200:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    networks:
+      - final
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  airflow:
+    build:
+      context: ..
+      dockerfile: infra/dockerfiles/airflow.dockerfile
+    depends_on:
+      mlflow_init:
+        condition: service_completed_successfully
+      mlflow:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      AIRFLOW__WEBSERVER__WEB_SERVER_PORT: "8080"
+      PYTHONPATH: "/opt/airflow:/opt/airflow/src"
+      MLFLOW_TRACKING_URI: "http://mlflow:5000"
+      MLFLOW_EXPERIMENT: "ab-automl"
+      REG_MODEL_NAME: "IrisClassifier"
+      TARGET: "target"
+      PSI_THRESHOLD: "0.2"
+      DRIFT_STRENGTH: "0.25"
+    ports:
+      - "8088:8080"
+    command: >
+      bash -lc "
+      airflow db migrate &&
+      airflow connections create-default-connections &&
+      airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
+      airflow webserver &
+      airflow scheduler
+      "
+    restart: always
+    networks:
+      - final
+    volumes:
+      - ../dags:/opt/airflow/dags
+      - ../src:/opt/airflow/src
+      - airflow_logs:/opt/airflow/logs
+      - airflow_db:/opt/airflow
+      - mlflow_data:/mlflow
+
+  ab_router:
+    build:
+      context: ..
+      dockerfile: infra/dockerfiles/flask.dockerfile
+    depends_on:
+      mlflow_init:
+        condition: service_completed_successfully
+      mlflow:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      MLFLOW_TRACKING_URI: "http://mlflow:5000"
+      MLFLOW_HTTP_REQUEST_TIMEOUT: "5"
+      MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"
+      REG_MODEL_NAME: "IrisClassifier"
+      AB_SPLIT_B: "0.3"
+      REQUEST_LOG: "/usr/src/app/logs/requests.csv"
+    ports:
+      - "8080:8080"
+    networks:
+      - final
+    volumes:
+      - ab_router_logs:/usr/src/app/logs
+      - mlflow_data:/mlflow
+
+networks:
+  final:
+     driver: bridge
+     external: false
+
+volumes:
+  mlflow_data:
+  airflow_logs:
+  airflow_db:
+  ab_router_logs:
