@@ -44,7 +44,7 @@
 
 <div style="display: flex; flex-direction: column; gap: 1rem; align-items: center">
     <img src="img/image-10.png" alt="Image 10" width="500">
-    <img src="img/image-9.png" alt="Image 9" width="500">
+    <img src="img/image-11.png" alt="Image 11" width="500">
 </div>
 
 ## 4. Регистрация модели в MLflow
@@ -58,7 +58,7 @@
 Переход в production осуществляется **только после успешного A/B-тестирования**.
 
 <div style="display: flex; flex-direction: column; gap: 1rem; align-items: center">
-    <img src="img/image-5.png" alt="Image 5" width="500">
+    <img src="img/image-9.png" alt="Image 9" width="500">
 </div>
 
 ## 5. Flask A/B-роутер

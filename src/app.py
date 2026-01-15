@@ -87,6 +87,7 @@ def _load_model_by_alias(alias: str) -> Tuple[Any, Optional[str]]:
     model = mlflow.pyfunc.load_model(uri)
     _model_cache[key] = model
     _model_meta_cache[key] = {"version": _get_model_version_by_alias(alias)}
+    
     return model, _model_meta_cache[key].get("version")
 
 
@@ -200,4 +201,4 @@ def predict():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")), debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT")), debug=False)

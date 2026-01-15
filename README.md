@@ -10,8 +10,6 @@
 
 Проект реализован на учебном датасете **Iris** и сфокусирован на **инфраструктуре и MLOps-процессах**, а не на подготовке данных.
 
----
-
 ## Архитектура проекта
 
 ```
@@ -19,8 +17,7 @@
 ├── dags/                 # Airflow DAG (drift, retraining, A/B evaluation)
 ├── src/
 │   ├── pipeline.py       # Drift detection + PyCaret AutoML + MLflow
-│   ├── app.py            # Flask A/B router
-│   └── ab_eval.py        # A/B анализ и promotion
+│   └── app.py            # Flask A/B router
 ├── infra/
 │   ├── dockerfiles/
 │   │   ├── airflow.dockerfile
@@ -28,8 +25,6 @@
 │   └── docker-compose.yml
 └── README.md
 ```
-
----
 
 ## Запуск проекта
 
@@ -44,8 +39,6 @@ docker compose up -d
 - **MLflow UI** — http://localhost:4200  
 - **Airflow UI** — http://localhost:8088 (admin / admin)  
 - **Flask A/B router** — http://localhost:8080  
-
----
 
 ## Первый запуск (важно)
 
@@ -75,16 +68,12 @@ curl -X POST http://localhost:8080/predict \
   }'
 ```
 
----
-
 ## A/B-роутер (Flask)
 
 - **A-трафик** → `models:/IrisClassifier@prod`  
 - **B-трафик** → `models:/IrisClassifier@staging`  
 
 Распределение детерминированное по `user_id`.
-
----
 
 ## Динамическое управление долей трафика
 
@@ -100,8 +89,6 @@ curl -X POST http://localhost:8080/config \
 curl http://localhost:8080/config
 ```
 
----
-
 ## Логирование (volume)
 
 ### Flask
@@ -116,16 +103,12 @@ curl http://localhost:8080/config
 - A/B отчёты:  
   `airflow_logs:/opt/airflow/logs/ab_reports/ab_eval_latest.json`
 
----
-
 ## A/B-оценка и promotion
 
 Задача `ab_evaluate_and_promote`:
 - считает Accuracy / Precision / Recall / F1
 - выполняет chi-square test (p < 0.05)
-- при успехе переводит `staging` → `prod`
-
----
+- при успехе переводит `staging` -> `prod`
 
 ## Размеченные запросы (label)
 

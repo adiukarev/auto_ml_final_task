@@ -120,20 +120,44 @@ def _register_in_mlflow_alias(**context):
 
 
 def _ab_evaluate_and_promote(**context):
+    dag_run = context.get("dag_run")
+    conf = (dag_run.conf or {}) if dag_run else {}
+
+    def _get_int(key: str, default: int) -> int:
+        v = conf.get(key)
+        if v is None:
+            v = os.environ.get(key)
+        try:
+            return int(v)
+        except Exception:
+            return int(default)
+
+    def _get_float(key: str, default: float) -> float:
+        v = conf.get(key)
+        if v is None:
+            v = os.environ.get(key)
+        try:
+            return float(v)
+        except Exception:
+            return float(default)
+
+    log_path = conf.get("AB_REQUEST_LOG") or AB_REQUEST_LOG
+    report_path = conf.get("AB_EVAL_REPORT") or AB_EVAL_REPORT
+
     report = pipeline.evaluate_ab_and_promote(
-        log_path=AB_REQUEST_LOG,
+        log_path=log_path,
         model_name=REG_MODEL_NAME,
-        prod_alias="prod",
-        staging_alias="staging",
-        min_labeled_rows=int(os.environ.get("AB_MIN_LABELED")),
-        min_delta_acc=float(os.environ.get("AB_MIN_DELTA_ACC")),
-        alpha=float(os.environ.get("AB_ALPHA")),
-        report_path=AB_EVAL_REPORT,
+        prod_alias=conf.get("AB_PROD_ALIAS", "prod"),
+        staging_alias=conf.get("AB_STAGING_ALIAS", "staging"),
+        min_labeled_rows=_get_int("AB_MIN_LABELED", 30),
+        min_delta_acc=_get_float("AB_MIN_DELTA_ACC", 0.0),
+        alpha=_get_float("AB_ALPHA", 0.05),
+        report_path=report_path,
     )
 
     print(f"[AB] Evaluation report: {report}")
-    
     return report
+
 
 
 with DAG(
@@ -156,7 +180,7 @@ with DAG(
     t_ab_eval = PythonOperator(
         task_id="ab_evaluate_and_promote", 
         python_callable=_ab_evaluate_and_promote, 
-        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS
+        trigger_rule=TriggerRule.ALL_DONE
     )
 
     end = EmptyOperator(task_id="end", trigger_rule="all_done")

@@ -1,5 +1,6 @@
 import os
 import tempfile
+import json
 import numpy as np
 import pandas as pd
 from sklearn.datasets import load_iris
@@ -7,6 +8,71 @@ from scipy.stats import ks_2samp
 
 import mlflow
 from mlflow.tracking import MlflowClient
+
+from mlflow.models.signature import infer_signature
+
+def _safe_log_dict_as_json(d: dict, artifact_path: str, filename: str = "report.json") -> None:
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, filename)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=2)
+            mlflow.log_artifact(p, artifact_path=artifact_path)
+    except Exception:
+        pass
+
+
+def _log_basic_dataset_profile(df: pd.DataFrame, target: str) -> None:
+    try:
+        mlflow.log_param("n_rows", int(df.shape[0]))
+        mlflow.log_param("n_cols", int(df.shape[1]))
+        mlflow.log_param("target", target)
+
+        vc = df[target].value_counts(dropna=False)
+        for i, (k, v) in enumerate(vc.items()):
+            if i >= 20:
+                break
+            mlflow.log_param(f"target_value_{i}", str(k))
+            mlflow.log_param(f"target_count_{i}", int(v))
+
+        na = df.isna().sum()
+        mlflow.log_param("n_missing_total", int(na.sum()))
+        mlflow.log_param("n_missing_cols", int((na > 0).sum()))
+    except Exception:
+        pass
+
+
+def _try_log_pycaret_plots(final_model) -> None:
+    try:
+        from pycaret.classification import plot_model
+    except Exception:
+        return
+
+    plots = [
+        ("confusion_matrix", "confusion_matrix"),
+        ("auc", "roc_auc"),
+        ("pr", "precision_recall"),
+        ("feature", "feature_importance"),
+    ]
+
+    with tempfile.TemporaryDirectory() as td:
+        cwd = os.getcwd()
+        try:
+            os.chdir(td)
+            for plot, name in plots:
+                try:
+                    plot_model(final_model, plot=plot, save=True)
+                    for fn in os.listdir(td):
+                        if fn.lower().endswith(".png"):
+                            mlflow.log_artifact(os.path.join(td, fn), artifact_path=f"plots/{name}")
+                            try:
+                                os.remove(os.path.join(td, fn))
+                            except Exception:
+                                pass
+                except Exception:
+                    continue
+        finally:
+            os.chdir(cwd)
 
 
 def _ensure_dir(path: str) -> None:
@@ -16,9 +82,9 @@ def _ensure_dir(path: str) -> None:
 
 
 def save_drift_report(report: pd.DataFrame, out_path: str) -> str:
-    """Save drift report to a persistent file (volume)."""
     _ensure_dir(out_path)
     report.to_csv(out_path, index=False)
+    
     return out_path
 
 
@@ -66,6 +132,7 @@ def ks_pvalue(expected: pd.Series, actual: pd.Series) -> float:
     actual = actual.replace([np.inf, -np.inf], np.nan).dropna()
     if expected.empty or actual.empty:
         return 1.0
+    
     return float(ks_2samp(expected, actual).pvalue)
 
 
@@ -105,17 +172,40 @@ def train_pycaret_and_log(train_df: pd.DataFrame, target: str, experiment_name: 
             fold=5,
             verbose=False,
             html=False,
-            # иначе PyCaret создаёт свои run'ы и всё едет
             log_experiment=False,
         )
+
+        _log_basic_dataset_profile(train_df, target)
+        mlflow.log_param("pycaret_session_id", 42)
+        mlflow.log_param("pycaret_fold", 5)
+        mlflow.log_param("pycaret_sort", "F1")
 
         best = compare_models(sort="F1")
         final = finalize_model(best)
 
-        # ВАЖНО: pull() после compare_models() возвращает leaderboard
+
+        try:
+            from pycaret.classification import predict_model
+            from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+            holdout = predict_model(final)
+            pred_col = "Label" if "Label" in holdout.columns else None
+            if pred_col is not None and target in holdout.columns:
+                y_true = holdout[target].astype(int).to_numpy()
+                y_pred = holdout[pred_col].astype(int).to_numpy()
+
+                mlflow.log_metric("holdout_accuracy", float(accuracy_score(y_true, y_pred)))
+                mlflow.log_metric("holdout_precision_macro", float(precision_score(y_true, y_pred, average="macro", zero_division=0)))
+                mlflow.log_metric("holdout_recall_macro", float(recall_score(y_true, y_pred, average="macro", zero_division=0)))
+                mlflow.log_metric("holdout_f1_macro", float(f1_score(y_true, y_pred, average="macro", zero_division=0)))
+
+            _try_log_pycaret_plots(final)
+        except Exception:
+            pass
+
+
         leaderboard = pull()
 
-        # метрики в mlflow
         if leaderboard is not None and len(leaderboard) > 0:
             top = leaderboard.iloc[0]
 
@@ -148,10 +238,18 @@ def train_pycaret_and_log(train_df: pd.DataFrame, target: str, experiment_name: 
             leaderboard.to_csv(f.name, index=False)
             mlflow.log_artifact(f.name, artifact_path="reports")
 
+        signature = None
+        try:
+            y_sig = final.predict(input_example)
+            signature = infer_signature(input_example, y_sig)
+        except Exception:
+            pass
+
         mlflow.sklearn.log_model(
             sk_model=final,
             artifact_path="model",
             input_example=input_example,
+            signature=signature,
         )
 
         client = MlflowClient()
@@ -162,7 +260,6 @@ def train_pycaret_and_log(train_df: pd.DataFrame, target: str, experiment_name: 
             )
 
         return {"run_id": run.info.run_id, "model_uri": f"runs:/{run.info.run_id}/model"}
-
 
 
 def register_model(model_uri: str, model_name: str, alias: str = "staging") -> dict:
@@ -185,16 +282,27 @@ def evaluate_ab_and_promote(
     alpha: float = 0.05,
     report_path: str | None = None,
 ) -> dict:
-    """Evaluate A/B requests log and optionally promote staging -> prod.
-
-    Requirements mapping:
-    - Reads all requests from a persisted CSV log (volume)
-    - Computes ML-metrics for A(prod) vs B(staging) when `label` is present
-    - Computes statistical significance using chi-square on correctness table
-    - If B is significantly better (p < alpha) and meets delta criterion, promote alias.
-    """
     from scipy.stats import chi2_contingency
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+    started_run = False
+    if mlflow.active_run() is None:
+        try:
+            mlflow.start_run(run_name="ab_evaluation")
+            started_run = True
+        except Exception:
+            started_run = False
+
+    try:
+        mlflow.log_param("ab_log_path", log_path)
+        mlflow.log_param("ab_model_name", model_name)
+        mlflow.log_param("ab_prod_alias", prod_alias)
+        mlflow.log_param("ab_staging_alias", staging_alias)
+        mlflow.log_param("ab_min_labeled_rows", int(min_labeled_rows))
+        mlflow.log_param("ab_min_delta_acc", float(min_delta_acc))
+        mlflow.log_param("ab_alpha", float(alpha))
+    except Exception:
+        pass
 
     if not os.path.exists(log_path):
         return {
@@ -207,7 +315,6 @@ def evaluate_ab_and_promote(
     if df.empty:
         return {"status": "no_data", "detail": "Empty log", "promoted": False}
 
-    # Only rows with a known label can be evaluated for accuracy/recall etc.
     if "label" not in df.columns:
         return {"status": "no_labels", "detail": "Column 'label' missing", "promoted": False}
 
@@ -215,7 +322,6 @@ def evaluate_ab_and_promote(
     if df.empty:
         return {"status": "no_labels", "detail": "No labeled rows", "promoted": False}
 
-    # Normalize label/prediction to int where possible (Iris: 0,1,2)
     def _to_int(x):
         try:
             return int(float(x))
@@ -242,6 +348,7 @@ def evaluate_ab_and_promote(
     def _metrics(d: pd.DataFrame) -> dict:
         y_t = d["y_true"].astype(int).to_numpy()
         y_p = d["y_pred"].astype(int).to_numpy()
+
         return {
             "n": int(len(d)),
             "accuracy": float(accuracy_score(y_t, y_p)),
@@ -253,7 +360,6 @@ def evaluate_ab_and_promote(
     m_prod = _metrics(df_prod)
     m_stg = _metrics(df_stg)
 
-    # Chi-square test on correctness (works for classification accuracy comparison)
     prod_correct = int((df_prod["y_true"] == df_prod["y_pred"]).sum())
     prod_wrong = int(len(df_prod) - prod_correct)
     stg_correct = int((df_stg["y_true"] == df_stg["y_pred"]).sum())
@@ -263,9 +369,9 @@ def evaluate_ab_and_promote(
 
     promoted = False
     decision = "keep_prod"
+
     if (m_stg["accuracy"] >= m_prod["accuracy"] + min_delta_acc) and (p_value < alpha):
         client = MlflowClient()
-        # Resolve current staging version and point prod alias to it
         stg_mv = client.get_model_version_by_alias(model_name, staging_alias)
         client.set_registered_model_alias(model_name, prod_alias, str(stg_mv.version))
         promoted = True
@@ -285,6 +391,33 @@ def evaluate_ab_and_promote(
         _ensure_dir(report_path)
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
+
+    # ---- persist report to MLflow
+    try:
+        _safe_log_dict_as_json(report, artifact_path="ab_eval")
+        if report_path and os.path.exists(report_path):
+            mlflow.log_artifact(report_path, artifact_path="ab_eval")
+        # metrics (flat)
+        if "metrics_prod" in report:
+            for k,v in report["metrics_prod"].items():
+                if isinstance(v,(int,float)):
+                    mlflow.log_metric(f"ab_prod_{k}", float(v))
+        if "metrics_staging" in report:
+            for k,v in report["metrics_staging"].items():
+                if isinstance(v,(int,float)):
+                    mlflow.log_metric(f"ab_staging_{k}", float(v))
+        for k in ["delta_acc", "p_value"]:
+            if k in report and isinstance(report[k],(int,float)):
+                mlflow.log_metric(f"ab_{k}", float(report[k]))
+        mlflow.log_param("ab_promoted", bool(report.get("promoted", False)))
+    except Exception:
+        pass
+
+    if started_run:
+        try:
+            mlflow.end_run()
+        except Exception:
+            pass
 
     return report
 
